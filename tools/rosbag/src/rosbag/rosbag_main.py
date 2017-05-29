@@ -222,8 +222,6 @@ def play_cmd(argv):
     parser.add_option("--pause-topics", dest="pause_topics", default=[],  callback=handle_pause_topics, action="callback", help="topics to pause on during playback")
     parser.add_option("--bags",  help="bags files to play back from")
     parser.add_option("--wait-for-subscribers",  dest="wait_for_subscribers", default=False, action="store_true", help="wait for at least one subscriber on each topic before publishing")
-    parser.add_option("--rate-control-topic", dest="rate_control_topic", default='', type='str', help="watch the given topic, and if the last publish was more than <rate-control-max-delay> ago, wait until the topic publishes again to continue playback")
-    parser.add_option("--rate-control-max-delay", dest="rate_control_max_delay", default=1.0, type='float', help="maximum time difference from <rate-control-topic> before pausing")
 
     (options, args) = parser.parse_args(argv)
 
@@ -271,12 +269,6 @@ def play_cmd(argv):
     if options.topics or options.pause_topics:
         cmd.extend(['--bags'])
 
-    if options.rate_control_topic:
-        cmd.extend(['--rate-control-topic', str(options.rate_control_topic)])
-
-    if options.rate_control_max_delay:
-        cmd.extend(['--rate-control-max-delay', str(options.rate_control_max_delay)])
-
     cmd.extend(args)
 
     old_handler = signal.signal(
@@ -305,8 +297,10 @@ The following variables are available:
  * t: time of message (t.secs, t.nsecs)""",
                                    description='Filter the contents of the bag.')
     parser.add_option('-p', '--print', action='store', dest='verbose_pattern', default=None, metavar='PRINT-EXPRESSION', help='Python expression to print for verbose debugging. Uses same variables as filter-expression')
+    parser.add_option("--node", dest="node", default=None, type='string',action="store", help="filter all topics by a specific node")
 
     options, args = parser.parse_args(argv)
+
     if len(args) == 0:
         parser.error('You must specify an in bag, an out bag, and an expression.')
     if len(args) == 1:
@@ -329,7 +323,17 @@ The following variables are available:
     filter_fn = expr_eval(expr)
 
     outbag = Bag(outbag_filename, 'w')
-    
+    if options.node:
+        playpath = roslib.packages.find_node('rosbag', 'filter_node')
+        cmd = [playpath[0]]
+        cmd.extend([inbag_filename, options.node])
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        process.wait()
+        allowed = set()
+        for line in process.stdout:
+            topic, sec, nsec = line.split(' ')
+            allowed.add((topic, int(sec), int(nsec)))
+
     try:
         inbag = Bag(inbag_filename)
     except ROSBagUnindexedException as ex:
@@ -344,6 +348,8 @@ The following variables are available:
             verbose_pattern = expr_eval(options.verbose_pattern)
     
             for topic, raw_msg, t in inbag.read_messages(raw=True):
+                if options.node and (topic, t.secs, t.nsecs) not in allowed:
+                    continue
                 msg_type, serialized_bytes, md5sum, pos, pytype = raw_msg
                 msg = pytype()
                 msg.deserialize(serialized_bytes)
@@ -358,10 +364,11 @@ The following variables are available:
                 meter.step(total_bytes)
         else:
             for topic, raw_msg, t in inbag.read_messages(raw=True):
+                if options.node and (topic, t.secs, t.nsecs) not in allowed:
+                    continue
                 msg_type, serialized_bytes, md5sum, pos, pytype = raw_msg
                 msg = pytype()
                 msg.deserialize(serialized_bytes)
-
                 if filter_fn(topic, msg, t):
                     outbag.write(topic, msg, t)
 
@@ -485,7 +492,7 @@ def check_cmd(argv):
     migrations = checkbag(mm, args[0])
        
     if len(migrations) == 0:
-        print('Bag file does not need any migrations.')
+        print('Bag file is up to date.')
         exit(0)
         
     print('The following migrations need to occur:')
